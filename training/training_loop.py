@@ -353,6 +353,12 @@ def training_loop(
             images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
 
+            fixed_z = np.stack([np.random.RandomState(seed).randn(G.z_dim).astype(np.float32) for seed in range(16)])
+            fixed_z = torch.from_numpy(fixed_z).to(device).split(batch_gpu)
+            fixed_c = torch.zeros([16, G.c_dim], device=device).split(batch_gpu)
+            fixed_images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(fixed_z, fixed_c)]).numpy()
+            save_image_grid(fixed_images, os.path.join(run_dir, f'fixed_fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=(4,4))
+
         # Save network snapshot.
         snapshot_pkl = None
         snapshot_data = None
