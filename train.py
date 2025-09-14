@@ -121,6 +121,31 @@ def parse_comma_separated_list(s):
 
 #----------------------------------------------------------------------------
 
+def extract_resume_kimg(resume_pkl):
+    """Extract the kimg value from a snapshot filename.
+    
+    Args:
+        resume_pkl: Path to the snapshot pickle file
+        
+    Returns:
+        int: The kimg value if found in filename, 0 otherwise
+    """
+    if resume_pkl is None:
+        return 0
+        
+    # Extract just the filename from the path
+    filename = os.path.basename(resume_pkl)
+    
+    # Look for pattern like "network-snapshot-012345.pkl"
+    match = re.match(r'network-snapshot-(\d+)\.pkl', filename)
+    if match:
+        return int(match.group(1))
+    
+    # If no match found, return 0 (start from beginning)
+    return 0
+
+#----------------------------------------------------------------------------
+
 @click.command()
 
 # Required.
@@ -261,6 +286,7 @@ def main(**kwargs):
     # Resume.
     if opts.resume is not None:
         c.resume_pkl = opts.resume
+        c.resume_kimg = extract_resume_kimg(opts.resume)
         c.ada_kimg = 100 # Make ADA react faster at the beginning.
         c.ema_rampup = None # Disable EMA rampup.
         c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.
