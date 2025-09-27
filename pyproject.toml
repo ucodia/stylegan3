@@ -3,12 +3,12 @@ name = "stylegan3"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "click>=8.2.1",
     "imageio>=2.37.0",
     "imageio-ffmpeg>=0.6.0",
-    "numpy>=2.3.3",
+    "numpy==1.26.4",
     "packaging>=25.0",
     "psutil>=7.0.0",
     "pyspng>=0.1.3",
