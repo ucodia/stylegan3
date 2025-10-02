@@ -41,15 +41,41 @@ def _find_compiler_bindir():
 
 #----------------------------------------------------------------------------
 
-def _get_mangled_gpu_name():
-    name = torch.cuda.get_device_name().lower()
-    out = []
-    for c in name:
-        if re.match('[a-z0-9_-]+', c):
-            out.append(c)
-        else:
-            out.append('-')
-    return ''.join(out)
+def _get_cuda_compute_version():
+    if not torch.cuda.is_available():
+        return None
+    return ".".join(map(str, torch.cuda.get_device_capability(torch.cuda.current_device())))
+
+def _get_cache_identifier():
+    arch_list_env = os.environ.get('TORCH_CUDA_ARCH_LIST', '').strip()
+    
+    if arch_list_env:
+        arch_versions = [arch.strip() for arch in arch_list_env.split(';') if arch.strip()]
+        if arch_versions:
+            sorted_archs = sorted(arch_versions, key=lambda x: tuple(map(int, x.split('.'))))
+            return '_'.join(sorted_archs)
+    
+    return _get_cuda_compute_version()
+
+def _find_compatible_cache_dir(build_top_dir, source_digest):
+    current_compute = _get_cuda_compute_version()
+    
+    if current_compute is None:
+        return None
+    
+    cache_pattern = os.path.join(build_top_dir, f'{source_digest}-*')
+    existing_caches = glob.glob(cache_pattern)
+    
+    if not existing_caches:
+        return None
+    
+    for cache_dir in existing_caches:
+        cache_suffix = os.path.basename(cache_dir).split('-', 1)[1]      
+        arch_list = cache_suffix.split('_')
+        if current_compute in arch_list:
+            return cache_dir
+    
+    return None  # No compatible cache found
 
 #----------------------------------------------------------------------------
 # Main entry point for compiling and loading C++/CUDA plugins.
@@ -117,7 +143,14 @@ def get_plugin(module_name, sources, headers=None, source_dir=None, **build_kwar
             # Select cached build directory name.
             source_digest = hash_md5.hexdigest()
             build_top_dir = torch.utils.cpp_extension._get_build_directory(module_name, verbose=verbose_build) # pylint: disable=protected-access
-            cached_build_dir = os.path.join(build_top_dir, f'{source_digest}-{_get_mangled_gpu_name()}')
+            
+            # First, try to find a compatible existing cache
+            cached_build_dir = _find_compatible_cache_dir(build_top_dir, source_digest)
+            
+            if cached_build_dir is None:
+                # No compatible cache found, create new one with current identifier
+                cache_identifier = _get_cache_identifier()
+                cached_build_dir = os.path.join(build_top_dir, f'{source_digest}-{cache_identifier}')
 
             if not os.path.isdir(cached_build_dir):
                 tmpdir = f'{build_top_dir}/srctmp-{uuid.uuid4().hex}'
