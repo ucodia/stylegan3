@@ -9,14 +9,13 @@
 import glob
 import hashlib
 import importlib
+import importlib.util
 import os
-import re
 import shutil
 import uuid
 
 import torch
 import torch.utils.cpp_extension
-from torch.utils.file_baton import FileBaton
 
 #----------------------------------------------------------------------------
 # Global options.
@@ -152,7 +151,22 @@ def get_plugin(module_name, sources, headers=None, source_dir=None, **build_kwar
                 cache_identifier = _get_cache_identifier()
                 cached_build_dir = os.path.join(build_top_dir, f'{source_digest}-{cache_identifier}')
 
-            if not os.path.isdir(cached_build_dir):
+            # Check if we already have a compiled module in the cache
+            if os.path.isdir(cached_build_dir):
+                for ext in ['.so', '.pyd']:
+                    compiled_file = os.path.join(cached_build_dir, f'{module_name}{ext}')
+                    if os.path.isfile(compiled_file):
+                        try:
+                            spec = importlib.util.spec_from_file_location(module_name, compiled_file)
+                            module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(module)
+                            print(f'Loaded cached PyTorch plugin "{module_name}" from {compiled_file}.')
+                            _cached_plugins[module_name] = module
+                            return module
+                        except (ImportError, Exception) as e:
+                            print(f'Cached module "{module_name}" failed to load ({e}), rebuilding...')
+                            break
+            else:
                 tmpdir = f'{build_top_dir}/srctmp-{uuid.uuid4().hex}'
                 os.makedirs(tmpdir)
                 for src in all_source_files:
