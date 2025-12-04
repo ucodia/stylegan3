@@ -10,6 +10,8 @@ import time
 import glfw
 import OpenGL.GL as gl
 from . import gl_utils
+import numpy
+import platform
 
 #----------------------------------------------------------------------------
 
@@ -32,9 +34,18 @@ class GlfwWindow: # pylint: disable=too-many-public-methods
         # Create window.
         glfw.init()
         glfw.window_hint(glfw.VISIBLE, False)
+        
+        # Set OpenGL context version for macOS
+        if platform.system() == 'Darwin':
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 4)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
+        
         self._glfw_window = glfw.create_window(width=window_width, height=window_height, title=title, monitor=None, share=None)
         self._attach_glfw_callbacks()
         self.make_context_current()
+
+        # After make_context_current(), initialize shaders
+        self._init_gl_resources()
 
         # Adjust window.
         self.set_vsync(False)
@@ -182,12 +193,27 @@ class GlfwWindow: # pylint: disable=too-many-public-methods
 
         # Initialize GL state.
         gl.glViewport(0, 0, self.content_width, self.content_height)
-        gl.glMatrixMode(gl.GL_PROJECTION)
-        gl.glLoadIdentity()
-        gl.glTranslate(-1, 1, 0)
-        gl.glScale(2 / max(self.content_width, 1), -2 / max(self.content_height, 1), 1)
-        gl.glMatrixMode(gl.GL_MODELVIEW)
-        gl.glLoadIdentity()
+        
+        # Calculate projection matrix
+        aspect = self.content_width / max(self.content_height, 1)
+        scale_x = 1 / aspect
+        scale_y = 1
+        
+        # Create orthographic projection matrix
+        projection = numpy.array([
+            [scale_x, 0, 0, 0],
+            [0, scale_y, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ], dtype=numpy.float32)
+
+        # Use shader program
+        gl.glUseProgram(self.shader_program)
+        
+        # Set uniforms
+        proj_loc = gl.glGetUniformLocation(self.shader_program, "projection")
+        gl.glUniformMatrix4fv(proj_loc, 1, gl.GL_FALSE, projection)
+        
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_ONE, gl.GL_ONE_MINUS_SRC_ALPHA) # Pre-multiplied alpha.
 
@@ -225,5 +251,46 @@ class GlfwWindow: # pylint: disable=too-many-public-methods
 
     def _glfw_drop_callback(self, _window, paths):
         self._drag_and_drop_paths = paths
+
+    def _init_gl_resources(self):
+        # Basic vertex shader
+        vertex_shader = """
+        #version 330 core
+        layout (location = 0) in vec2 position;
+        uniform mat4 projection;
+        void main() {
+            gl_Position = projection * vec4(position, 0.0, 1.0);
+        }
+        """
+
+        # Basic fragment shader
+        fragment_shader = """
+        #version 330 core
+        out vec4 FragColor;
+        uniform vec4 color;
+        void main() {
+            FragColor = color;
+        }
+        """
+
+        # Create and compile shaders
+        self.shader_program = gl_utils.create_shader_program(vertex_shader, fragment_shader)
+        
+        # Create a simple quad for rendering
+        vertices = numpy.array([
+            -1.0, -1.0,
+             1.0, -1.0,
+             1.0,  1.0,
+            -1.0,  1.0,
+        ], dtype=numpy.float32)
+        
+        self.vao = gl.glGenVertexArrays(1)
+        self.vbo = gl.glGenBuffers(1)
+        
+        gl.glBindVertexArray(self.vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_STATIC_DRAW)
+        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+        gl.glEnableVertexAttribArray(0)
 
 #----------------------------------------------------------------------------

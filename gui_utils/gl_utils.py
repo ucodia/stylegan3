@@ -9,9 +9,11 @@
 import os
 import functools
 import contextlib
+import ctypes
 import numpy as np
 import OpenGL.GL as gl
 import OpenGL.GL.ARB.texture_float
+import OpenGL.GL.shaders as shaders
 import dnnlib
 
 #----------------------------------------------------------------------------
@@ -372,3 +374,210 @@ def _setup_circle(hole):
     return v.astype('float32')
 
 #----------------------------------------------------------------------------
+
+def create_shader_program(vertex_source, fragment_source):
+    vertex_shader = gl.glCreateShader(gl.GL_VERTEX_SHADER)
+    gl.glShaderSource(vertex_shader, vertex_source)
+    gl.glCompileShader(vertex_shader)
+    if not gl.glGetShaderiv(vertex_shader, gl.GL_COMPILE_STATUS):
+        raise RuntimeError(gl.glGetShaderInfoLog(vertex_shader))
+
+    fragment_shader = gl.glCreateShader(gl.GL_FRAGMENT_SHADER)
+    gl.glShaderSource(fragment_shader, fragment_source)
+    gl.glCompileShader(fragment_shader)
+    if not gl.glGetShaderiv(fragment_shader, gl.GL_COMPILE_STATUS):
+        raise RuntimeError(gl.glGetShaderInfoLog(fragment_shader))
+
+    program = gl.glCreateProgram()
+    gl.glAttachShader(program, vertex_shader)
+    gl.glAttachShader(program, fragment_shader)
+    gl.glLinkProgram(program)
+    if not gl.glGetProgramiv(program, gl.GL_LINK_STATUS):
+        raise RuntimeError(gl.glGetProgramInfoLog(program))
+
+    gl.glDeleteShader(vertex_shader)
+    gl.glDeleteShader(fragment_shader)
+    
+    return program
+
+#----------------------------------------------------------------------------
+
+# Basic shaders for texture rendering
+VERTEX_SHADER = """
+#version 330 core
+layout (location = 0) in vec2 position;
+layout (location = 1) in vec2 texCoord;
+out vec2 TexCoord;
+uniform vec2 scale;
+uniform vec2 translate;
+void main()
+{
+    vec2 pos = position * scale + translate;
+    gl_Position = vec4(pos, 0.0, 1.0);
+    TexCoord = texCoord;
+}
+"""
+
+FRAGMENT_SHADER = """
+#version 330 core
+in vec2 TexCoord;
+out vec4 FragColor;
+uniform sampler2D tex;
+uniform vec4 color;
+void main()
+{
+    FragColor = texture(tex, TexCoord) * color;
+}
+"""
+
+class ModernTexture:
+    def __init__(self, *, image=None, width=None, height=None, channels=None, dtype=None, bilinear=True, mipmap=True):
+        self.gl_id = None
+        self.bilinear = bilinear
+        self.mipmap = mipmap
+        
+        # Initialize shader program if not already created
+        if not hasattr(ModernTexture, 'shader_program'):
+            vertex_shader = shaders.compileShader(VERTEX_SHADER, gl.GL_VERTEX_SHADER)
+            fragment_shader = shaders.compileShader(FRAGMENT_SHADER, gl.GL_FRAGMENT_SHADER)
+            ModernTexture.shader_program = shaders.compileProgram(vertex_shader, fragment_shader)
+        self.shader_program = ModernTexture.shader_program  # Store reference to shader program
+        
+        # Initialize geometry
+        self._init_geometry()
+
+        # Determine size and dtype
+        if image is not None:
+            image = self._prepare_texture_data(image)
+            self.height, self.width, self.channels = image.shape
+            self.dtype = image.dtype
+        else:
+            assert width is not None and height is not None
+            self.width = width
+            self.height = height
+            self.channels = channels if channels is not None else 3
+            self.dtype = np.dtype(dtype) if dtype is not None else np.uint8
+
+        # Create texture
+        self.gl_id = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.gl_id)
+        
+        # Set texture parameters
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER,
+                          gl.GL_LINEAR if self.bilinear else gl.GL_NEAREST)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER,
+                          gl.GL_LINEAR_MIPMAP_LINEAR if self.mipmap else gl.GL_NEAREST)
+        
+        self.update(image)
+
+    def _init_geometry(self):
+        # Vertex data for a quad (position and texture coordinates)
+        # Flip the texture coordinates vertically (swapped Y coordinates)
+        vertices = np.array([
+            # positions  # texture coords
+            -1.0, -1.0,  0.0, 1.0,  # bottom left - changed texCoord from 0.0 to 1.0
+             1.0, -1.0,  1.0, 1.0,  # bottom right - changed texCoord from 0.0 to 1.0
+             1.0,  1.0,  1.0, 0.0,  # top right - changed texCoord from 1.0 to 0.0
+            -1.0,  1.0,  0.0, 0.0,  # top left - changed texCoord from 1.0 to 0.0
+        ], dtype=np.float32)
+        
+        # Create VAO and VBO
+        self.vao = gl.glGenVertexArrays(1)
+        self.vbo = gl.glGenBuffers(1)
+        
+        gl.glBindVertexArray(self.vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_STATIC_DRAW)
+        
+        # Position attribute
+        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, 4 * 4, None)
+        gl.glEnableVertexAttribArray(0)
+        
+        # Texture coord attribute
+        gl.glVertexAttribPointer(1, 2, gl.GL_FLOAT, gl.GL_FALSE, 4 * 4, ctypes.c_void_p(2 * 4))
+        gl.glEnableVertexAttribArray(1)
+
+    def _prepare_texture_data(self, image):
+        image = np.asarray(image)
+        if image.ndim == 2:
+            image = image[:, :, np.newaxis]
+        if image.dtype.name == 'float64':
+            image = image.astype('float32')
+        return image
+
+    def update(self, image):
+        if image is not None:
+            image = self._prepare_texture_data(image)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.gl_id)
+            
+            # Determine format based on number of channels
+            formats = {
+                1: (gl.GL_RED, gl.GL_R8),
+                2: (gl.GL_RG, gl.GL_RG8),
+                3: (gl.GL_RGB, gl.GL_RGB8),
+                4: (gl.GL_RGBA, gl.GL_RGBA8)
+            }
+            format_external, format_internal = formats[image.shape[2]]
+            
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, format_internal, 
+                           self.width, self.height, 0, format_external,
+                           gl.GL_UNSIGNED_BYTE if image.dtype == np.uint8 else gl.GL_FLOAT,
+                           image)
+            
+            if self.mipmap:
+                gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
+
+    def draw(self, *, pos=(0,0), zoom=1, align=0):
+        gl.glUseProgram(self.shader_program)
+        
+        # Calculate scale and translation
+        scale_x = zoom * self.width / 1920  # Normalize to screen coordinates
+        scale_y = zoom * self.height / 1080
+        translate_x = pos[0] / 960 - 1 - scale_x * align
+        translate_y = pos[1] / 540 - 1 - scale_y * align
+        
+        # Set uniforms
+        gl.glUniform2f(gl.glGetUniformLocation(self.shader_program, "scale"), scale_x, scale_y)
+        gl.glUniform2f(gl.glGetUniformLocation(self.shader_program, "translate"), translate_x, translate_y)
+        gl.glUniform4f(gl.glGetUniformLocation(self.shader_program, "color"), 1, 1, 1, 1)
+        
+        # Bind texture
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.gl_id)
+        gl.glUniform1i(gl.glGetUniformLocation(self.shader_program, "tex"), 0)
+        
+        # Draw quad
+        gl.glBindVertexArray(self.vao)
+        gl.glDrawArrays(gl.GL_TRIANGLE_FAN, 0, 4)
+        gl.glBindVertexArray(0)
+
+    def delete(self):
+        if self.gl_id is not None:
+            gl.glDeleteTextures([self.gl_id])
+            self.gl_id = None
+        if self.vao is not None:
+            gl.glDeleteVertexArrays(1, [self.vao])
+            self.vao = None
+        if self.vbo is not None:
+            gl.glDeleteBuffers(1, [self.vbo])
+            self.vbo = None
+
+    def is_compatible(self, *, image=None, width=None, height=None, channels=None, dtype=None):
+        """Check if the texture is compatible with the given parameters."""
+        if image is not None:
+            if image.ndim != 3:
+                return False
+            ih, iw, ic = image.shape
+            if not self.is_compatible(width=iw, height=ih, channels=ic, dtype=image.dtype):
+                return False
+        if width is not None and self.width != width:
+            return False
+        if height is not None and self.height != height:
+            return False
+        if channels is not None and self.channels != channels:
+            return False
+        if dtype is not None and self.dtype != dtype:
+            return False
+        return True

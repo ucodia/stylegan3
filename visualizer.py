@@ -117,7 +117,8 @@ class Visualizer(imgui_window.ImguiWindow):
 
         # Begin control pane.
         imgui.set_next_window_position(0, 0)
-        imgui.set_next_window_size(self.pane_w, self.content_height)
+        # imgui.set_next_window_size(self.pane_w, self.content_height)
+        imgui.set_next_window_size(self.pane_w, 600)
         imgui.begin('##control_pane', closable=False, flags=(imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE))
 
         # Widgets.
@@ -154,19 +155,26 @@ class Visualizer(imgui_window.ImguiWindow):
             if self._tex_img is not self.result.image:
                 self._tex_img = self.result.image
                 if self._tex_obj is None or not self._tex_obj.is_compatible(image=self._tex_img):
-                    self._tex_obj = gl_utils.Texture(image=self._tex_img, bilinear=False, mipmap=False)
+                    self._tex_obj = gl_utils.ModernTexture(image=self._tex_img, bilinear=False, mipmap=False)
                 else:
                     self._tex_obj.update(self._tex_img)
             zoom = min(max_w / self._tex_obj.width, max_h / self._tex_obj.height)
             zoom = np.floor(zoom) if zoom >= 1 else zoom
-            self._tex_obj.draw(pos=pos, zoom=zoom, align=0.5, rint=True)
+            self._tex_obj.draw(pos=pos, zoom=zoom, align=0.5)
         if 'error' in self.result:
             self.print_error(self.result.error)
             if 'message' not in self.result:
                 self.result.message = str(self.result.error)
         if 'message' in self.result:
-            tex = text_utils.get_texture(self.result.message, size=self.font_size, max_width=max_w, max_height=max_h, outline=2)
-            tex.draw(pos=pos, align=0.5, rint=True, color=1)
+            # text_size = imgui.calc_text_size(self.result.message)
+            # text_pos_x = self.pane_w + (max_w - text_size.x) / 2
+            # text_pos_y = (max_h - text_size.y) / 2
+            imgui.set_cursor_pos(tuple(pos))
+            imgui.text(self.result.message)
+            # Old code for reference
+            # tex = text_utils.get_texture(self.result.message, size=self.font_size, max_width=max_w, max_height=max_h, outline=2)
+            # tex.draw(pos=pos, align=0.5, rint=True, color=1)
+
 
         # End frame.
         self._adjust_font_size()
