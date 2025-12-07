@@ -118,25 +118,41 @@ def _apply_affine_transformation(x, mat, up=4, **filter_kwargs):
 
 class Renderer:
     def __init__(self):
-        self._device        = torch.device('cuda')
+        # Select best available device
+        if torch.cuda.is_available():
+            self._device = torch.device('cuda')
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            self._device = torch.device('mps')
+        else:
+            self._device = torch.device('cpu')
+
         self._pkl_data      = dict()    # {pkl: dict | CapturedException, ...}
         self._networks      = dict()    # {cache_key: torch.nn.Module, ...}
         self._pinned_bufs   = dict()    # {(shape, dtype): torch.Tensor, ...}
         self._cmaps         = dict()    # {name: torch.Tensor, ...}
         self._is_timing     = False
-        self._start_event   = torch.cuda.Event(enable_timing=True)
-        self._end_event     = torch.cuda.Event(enable_timing=True)
+        self._use_cuda_events = torch.cuda.is_available()
+        if self._use_cuda_events:
+            self._start_event   = torch.cuda.Event(enable_timing=True)
+            self._end_event     = torch.cuda.Event(enable_timing=True)
+        else:
+            self._start_event   = None
+            self._end_event     = None
         self._net_layers    = dict()    # {cache_key: [dnnlib.EasyDict, ...], ...}
 
     def render(self, **args):
+        import time
         self._is_timing = True
-        self._start_event.record(torch.cuda.current_stream(self._device))
+        start_time = time.perf_counter()
+        if self._use_cuda_events:
+            self._start_event.record(torch.cuda.current_stream(self._device))
         res = dnnlib.EasyDict()
         try:
             self._render_impl(res, **args)
         except:
             res.error = CapturedException()
-        self._end_event.record(torch.cuda.current_stream(self._device))
+        if self._use_cuda_events:
+            self._end_event.record(torch.cuda.current_stream(self._device))
         if 'image' in res:
             res.image = self.to_cpu(res.image).numpy()
         if 'stats' in res:
@@ -144,8 +160,11 @@ class Renderer:
         if 'error' in res:
             res.error = str(res.error)
         if self._is_timing:
-            self._end_event.synchronize()
-            res.render_time = self._start_event.elapsed_time(self._end_event) * 1e-3
+            if self._use_cuda_events:
+                self._end_event.synchronize()
+                res.render_time = self._start_event.elapsed_time(self._end_event) * 1e-3
+            else:
+                res.render_time = time.perf_counter() - start_time
             self._is_timing = False
         return res
 
@@ -193,6 +212,9 @@ class Renderer:
         return net
 
     def _get_pinned_buf(self, ref):
+        # Only use pinned memory for CUDA
+        if not self._use_cuda_events:
+            return None
         key = (tuple(ref.shape), ref.dtype)
         buf = self._pinned_bufs.get(key, None)
         if buf is None:
@@ -201,10 +223,16 @@ class Renderer:
         return buf
 
     def to_device(self, buf):
-        return self._get_pinned_buf(buf).copy_(buf).to(self._device)
+        if self._use_cuda_events:
+            return self._get_pinned_buf(buf).copy_(buf).to(self._device)
+        else:
+            return buf.to(self._device)
 
     def to_cpu(self, buf):
-        return self._get_pinned_buf(buf).copy_(buf).clone()
+        if self._use_cuda_events:
+            return self._get_pinned_buf(buf).copy_(buf).clone()
+        else:
+            return buf.cpu().clone()
 
     def _ignore_timing(self):
         self._is_timing = False

@@ -7,8 +7,10 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import os
+import sys
 import imgui
 import imgui.integrations.glfw
+import imgui.integrations.opengl
 
 from . import glfw_window
 from . import imgui_utils
@@ -90,14 +92,69 @@ class ImguiWindow(glfw_window.GlfwWindow):
         super().end_frame()
 
 #----------------------------------------------------------------------------
-# Wrapper class for GlfwRenderer to fix a mouse wheel bug on Linux.
+# Wrapper class to use FixedPipelineRenderer on macOS due to OpenGL limitations
 
-class _GlfwRenderer(imgui.integrations.glfw.GlfwRenderer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class _GlfwRenderer(imgui.integrations.opengl.FixedPipelineRenderer):
+    def __init__(self, window, *args, **kwargs):
+        self.window = window
+        super().__init__()
         self.mouse_wheel_multiplier = 1
+        self._map_keys()
+
+    def keyboard_callback(self, window, key, scancode, action, mods):
+        # Handle keyboard input for imgui
+        pass
 
     def scroll_callback(self, window, x_offset, y_offset):
         self.io.mouse_wheel += y_offset * self.mouse_wheel_multiplier
+
+    def _map_keys(self):
+        # Map GLFW keys to imgui keys
+        import glfw
+        io = self.io
+        io.key_map[imgui.KEY_TAB] = glfw.KEY_TAB
+        io.key_map[imgui.KEY_LEFT_ARROW] = glfw.KEY_LEFT
+        io.key_map[imgui.KEY_RIGHT_ARROW] = glfw.KEY_RIGHT
+        io.key_map[imgui.KEY_UP_ARROW] = glfw.KEY_UP
+        io.key_map[imgui.KEY_DOWN_ARROW] = glfw.KEY_DOWN
+        io.key_map[imgui.KEY_PAGE_UP] = glfw.KEY_PAGE_UP
+        io.key_map[imgui.KEY_PAGE_DOWN] = glfw.KEY_PAGE_DOWN
+        io.key_map[imgui.KEY_HOME] = glfw.KEY_HOME
+        io.key_map[imgui.KEY_END] = glfw.KEY_END
+        io.key_map[imgui.KEY_DELETE] = glfw.KEY_DELETE
+        io.key_map[imgui.KEY_BACKSPACE] = glfw.KEY_BACKSPACE
+        io.key_map[imgui.KEY_ENTER] = glfw.KEY_ENTER
+        io.key_map[imgui.KEY_ESCAPE] = glfw.KEY_ESCAPE
+        io.key_map[imgui.KEY_A] = glfw.KEY_A
+        io.key_map[imgui.KEY_C] = glfw.KEY_C
+        io.key_map[imgui.KEY_V] = glfw.KEY_V
+        io.key_map[imgui.KEY_X] = glfw.KEY_X
+        io.key_map[imgui.KEY_Y] = glfw.KEY_Y
+        io.key_map[imgui.KEY_Z] = glfw.KEY_Z
+
+    def process_inputs(self):
+        import glfw
+        io = imgui.get_io()
+
+        window_size = glfw.get_window_size(self.window)
+        fb_size = glfw.get_framebuffer_size(self.window)
+
+        io.display_size = window_size
+        io.display_fb_scale = (
+            fb_size[0] / window_size[0] if window_size[0] > 0 else 0,
+            fb_size[1] / window_size[1] if window_size[1] > 0 else 0
+        )
+
+        io.delta_time = 1.0/60.0
+
+        if glfw.get_window_attrib(self.window, glfw.FOCUSED):
+            mouse_pos = glfw.get_cursor_pos(self.window)
+            io.mouse_pos = mouse_pos
+        else:
+            io.mouse_pos = -1, -1
+
+        io.mouse_down[0] = glfw.get_mouse_button(self.window, glfw.MOUSE_BUTTON_LEFT)
+        io.mouse_down[1] = glfw.get_mouse_button(self.window, glfw.MOUSE_BUTTON_RIGHT)
+        io.mouse_down[2] = glfw.get_mouse_button(self.window, glfw.MOUSE_BUTTON_MIDDLE)
 
 #----------------------------------------------------------------------------

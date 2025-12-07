@@ -181,7 +181,9 @@ class GlfwWindow: # pylint: disable=too-many-public-methods
         self.make_context_current()
 
         # Initialize GL state.
-        gl.glViewport(0, 0, self.content_width, self.content_height)
+        # Use framebuffer size for viewport (handles Retina/HiDPI displays)
+        fb_width, fb_height = glfw.get_framebuffer_size(self._glfw_window)
+        gl.glViewport(0, 0, fb_width, fb_height)
         gl.glMatrixMode(gl.GL_PROJECTION)
         gl.glLoadIdentity()
         gl.glTranslate(-1, 1, 0)
