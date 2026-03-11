@@ -10,6 +10,15 @@ The goal of this repository is to continue developping the tooling for training 
 - Apple Silicon support for image and video generation
 - Add support for quantized palette images in dataset creation tool
 
+## Carbon Tracking
+
+Training runs are instrumented with [CodeCarbon](https://codecarbon.io/) to measure energy consumption and CO2 equivalent emissions. This runs automatically on rank 0 during training.
+
+**Outputs per training run:**
+- `emissions.csv` — detailed CodeCarbon report (flushed every tick)
+- `energy` (kWh) and `co2eq` (kg CO2eq) in the console status line
+- `Emissions/energy_kwh` and `Emissions/co2eq_kg` curves in TensorBoard
+
 ## Setup
 
 This was tested on Python 3.13 only.
