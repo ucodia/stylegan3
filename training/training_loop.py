@@ -265,8 +265,8 @@ def training_loop(
             project_name="stylegan3",
         )
         tracker.start()
-    prev_energy_kwh = 0.0
-    prev_co2_kg = 0.0
+    prev_energy_wh = 0.0
+    prev_co2_g = 0.0
 
     while True:
 
@@ -354,16 +354,16 @@ def training_loop(
         torch.cuda.reset_peak_memory_stats()
         fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
         if tracker is not None:
-            energy_kwh = tracker._total_energy.kWh
-            co2_kg = tracker._total_emissions
-            energy_tick = energy_kwh - prev_energy_kwh
-            co2_tick = co2_kg - prev_co2_kg
-            prev_energy_kwh = energy_kwh
-            prev_co2_kg = co2_kg
-            fields += [f"energy/tick {training_stats.report0('Emissions/energy_kwh_per_tick', energy_tick):<8.4f}"]
-            fields += [f"co2eq/tick {training_stats.report0('Emissions/co2eq_kg_per_tick', co2_tick):<10.6f}"]
-            training_stats.report0('Emissions/energy_kwh', energy_kwh)
-            training_stats.report0('Emissions/co2eq_kg', co2_kg)
+            energy_wh = tracker._total_energy.kWh * 1000
+            co2_g = tracker._total_emissions * 1000
+            energy_tick = energy_wh - prev_energy_wh
+            co2_tick = co2_g - prev_co2_g
+            prev_energy_wh = energy_wh
+            prev_co2_g = co2_g
+            fields += [f"energy/tick {training_stats.report0('Emissions/energy_wh_per_tick', energy_tick):<8.4f}"]
+            fields += [f"co2eq/tick {training_stats.report0('Emissions/co2eq_g_per_tick', co2_tick):<10.6f}"]
+            training_stats.report0('Emissions/energy_wh', energy_wh)
+            training_stats.report0('Emissions/co2eq_g', co2_g)
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
         if rank == 0:
@@ -451,11 +451,10 @@ def training_loop(
         if done:
             break
 
-    # Stop emissions tracking.
     if tracker is not None:
         emissions = tracker.stop()
         if rank == 0:
-            print(f'Total emissions: {emissions:.6f} kg CO2eq')
+            print(f'Total emissions: {emissions * 1000:.4f} g CO2eq')
 
     # Done.
     if rank == 0:

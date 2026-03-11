@@ -16,8 +16,8 @@ Training runs are instrumented with [CodeCarbon](https://codecarbon.io/) to meas
 
 **Outputs per training run:**
 - `emissions.csv` — detailed CodeCarbon report (flushed every tick)
-- `energy` (kWh) and `co2eq` (kg CO2eq) in the console status line
-- `Emissions/energy_kwh` and `Emissions/co2eq_kg` curves in TensorBoard
+- `energy/tick` (Wh) and `co2eq/tick` (g CO2eq) in the console status line
+- `Emissions/energy_wh` and `Emissions/co2eq_g` curves in TensorBoard
 
 ## Setup
 
