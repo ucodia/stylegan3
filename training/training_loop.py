@@ -265,6 +265,8 @@ def training_loop(
             project_name="stylegan3",
         )
         tracker.start()
+    prev_energy_kwh = 0.0
+    prev_co2_kg = 0.0
 
     while True:
 
@@ -354,8 +356,14 @@ def training_loop(
         if tracker is not None:
             energy_kwh = tracker._total_energy.kWh
             co2_kg = tracker._total_emissions
-            fields += [f"energy {training_stats.report0('Emissions/energy_kwh', energy_kwh):<8.4f}"]
-            fields += [f"co2eq {training_stats.report0('Emissions/co2eq_kg', co2_kg):<10.6f}"]
+            energy_tick = energy_kwh - prev_energy_kwh
+            co2_tick = co2_kg - prev_co2_kg
+            prev_energy_kwh = energy_kwh
+            prev_co2_kg = co2_kg
+            fields += [f"energy/tick {training_stats.report0('Emissions/energy_kwh_per_tick', energy_tick):<8.4f}"]
+            fields += [f"co2eq/tick {training_stats.report0('Emissions/co2eq_kg_per_tick', co2_tick):<10.6f}"]
+            training_stats.report0('Emissions/energy_kwh', energy_kwh)
+            training_stats.report0('Emissions/co2eq_kg', co2_kg)
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
         if rank == 0:
