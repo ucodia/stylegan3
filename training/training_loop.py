@@ -24,6 +24,7 @@ from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import grid_sample_gradfix
 
 import legacy
+from codecarbon import EmissionsTracker
 from metrics import metric_main
 
 #----------------------------------------------------------------------------
@@ -251,6 +252,20 @@ def training_loop(
     batch_idx = 0
     if progress_fn is not None:
         progress_fn(0, total_kimg)
+
+    # Start emissions tracking (rank 0 only).
+    tracker = None
+    if rank == 0:
+        tracker = EmissionsTracker(
+            output_dir=run_dir,
+            output_file="emissions.csv",
+            save_to_api=False,
+            log_level="warning",
+            tracking_mode="process",
+            project_name="stylegan3",
+        )
+        tracker.start()
+
     while True:
 
         # Fetch training data.
@@ -336,6 +351,11 @@ def training_loop(
         fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
         torch.cuda.reset_peak_memory_stats()
         fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
+        if tracker is not None:
+            energy_kwh = tracker._total_energy.kWh
+            co2_kg = tracker._total_emissions
+            fields += [f"energy {training_stats.report0('Emissions/energy_kwh', energy_kwh):<8.4f}"]
+            fields += [f"co2eq {training_stats.report0('Emissions/co2eq_kg', co2_kg):<10.6f}"]
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
         if rank == 0:
@@ -411,6 +431,10 @@ def training_loop(
         if progress_fn is not None:
             progress_fn(cur_nimg // 1000, total_kimg)
 
+        # Flush emissions data for crash safety.
+        if tracker is not None:
+            tracker.flush()
+
         # Update state.
         cur_tick += 1
         tick_start_nimg = cur_nimg
@@ -418,6 +442,12 @@ def training_loop(
         maintenance_time = tick_start_time - tick_end_time
         if done:
             break
+
+    # Stop emissions tracking.
+    if tracker is not None:
+        emissions = tracker.stop()
+        if rank == 0:
+            print(f'Total emissions: {emissions:.6f} kg CO2eq')
 
     # Done.
     if rank == 0:
