@@ -12,7 +12,6 @@ Only works on 2D images and assumes
 `mode='bilinear'`, `padding_mode='zeros'`, `align_corners=False`."""
 
 import torch
-from packaging.version import parse as parse_version
 
 # pylint: disable=redefined-builtin
 # pylint: disable=arguments-differ
@@ -21,8 +20,6 @@ from packaging.version import parse as parse_version
 #----------------------------------------------------------------------------
 
 enabled = False  # Enable the custom op by setting this to true.
-_use_pytorch_1_11_api = parse_version(torch.__version__) >= parse_version('1.11.0a') # Allow prerelease builds of 1.11
-_use_pytorch_1_12_api = parse_version(torch.__version__) >= parse_version('1.12.0a') # Allow prerelease builds of 1.12
 
 #----------------------------------------------------------------------------
 
@@ -35,6 +32,23 @@ def grid_sample(input, grid):
 
 def _should_use_custom_op():
     return enabled
+
+#----------------------------------------------------------------------------
+
+def _grid_sampler_2d_backward(grad_output, input, grid):
+    """Call aten::grid_sampler_2d_backward through the dispatcher so that
+    MPS fallback (and any other backend fallback) is respected.
+    """
+    # torch.ops.aten goes through the proper dispatcher, unlike
+    # torch._C._jit_get_operation which bypasses it and fails on MPS.
+    output_mask = (True, True)
+    return torch.ops.aten.grid_sampler_2d_backward(
+        grad_output, input, grid,
+        0,      # interpolation_mode: bilinear
+        0,      # padding_mode: zeros
+        False,  # align_corners
+        output_mask,
+    )
 
 #----------------------------------------------------------------------------
 
@@ -58,14 +72,7 @@ class _GridSample2dForward(torch.autograd.Function):
 class _GridSample2dBackward(torch.autograd.Function):
     @staticmethod
     def forward(ctx, grad_output, input, grid):
-        op = torch._C._jit_get_operation('aten::grid_sampler_2d_backward')
-        if _use_pytorch_1_12_api:
-            op = op[0]
-        if _use_pytorch_1_11_api:
-            output_mask = (ctx.needs_input_grad[1], ctx.needs_input_grad[2])
-            grad_input, grad_grid = op(grad_output, input, grid, 0, 0, False, output_mask)
-        else:
-            grad_input, grad_grid = op(grad_output, input, grid, 0, 0, False)
+        grad_input, grad_grid = _grid_sampler_2d_backward(grad_output, input, grid)
         ctx.save_for_backward(grid)
         return grad_input, grad_grid
 

@@ -90,7 +90,8 @@ def report(name, value):
         elems.square().sum(),
     ])
     assert moments.ndim == 1 and moments.shape[0] == _num_moments
-    moments = moments.to(_counter_dtype)
+    # Move to CPU before converting to float64 since MPS does not support it.
+    moments = moments.cpu().to(_counter_dtype)
 
     device = moments.device
     if device not in _counters[name]:
@@ -241,8 +242,12 @@ def _sync(names):
     _sync_called = True
 
     # Collect deltas within current rank.
+    # Use CPU for accumulation if the sync device doesn't support float64 (e.g. MPS).
     deltas = []
     device = _sync_device if _sync_device is not None else torch.device('cpu')
+    accumulate_on_cpu = (device.type == 'mps')
+    if accumulate_on_cpu:
+        device = torch.device('cpu')
     for name in names:
         delta = torch.zeros([_num_moments], dtype=_counter_dtype, device=device)
         for counter in _counters[name].values():

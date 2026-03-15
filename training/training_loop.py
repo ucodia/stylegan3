@@ -20,6 +20,7 @@ import torch
 import dnnlib
 from torch_utils import misc
 from torch_utils import training_stats
+from torch_utils import device as device_utils
 from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import grid_sample_gradfix
 
@@ -125,12 +126,10 @@ def training_loop(
 ):
     # Initialize.
     start_time = time.time()
-    device = torch.device('cuda', rank)
+    device = device_utils.get_device(rank)
     np.random.seed(random_seed * num_gpus + rank)
     torch.manual_seed(random_seed * num_gpus + rank)
-    torch.backends.cudnn.benchmark = cudnn_benchmark    # Improves training speed.
-    torch.backends.cuda.matmul.allow_tf32 = False       # Improves numerical accuracy.
-    torch.backends.cudnn.allow_tf32 = False             # Improves numerical accuracy.
+    device_utils.configure_backends(device, cudnn_benchmark=cudnn_benchmark)
     conv2d_gradfix.enabled = True                       # Improves training speed.
     grid_sample_gradfix.enabled = True                  # Avoids errors with the augmentation pipe.
 
@@ -207,11 +206,9 @@ def training_loop(
             phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
             phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
     for phase in phases:
-        phase.start_event = None
-        phase.end_event = None
+        phase.timer = None
         if rank == 0:
-            phase.start_event = torch.cuda.Event(enable_timing=True)
-            phase.end_event = torch.cuda.Event(enable_timing=True)
+            phase.timer = device_utils.DeviceTimer(device)
 
     # Export sample images.
     grid_size = None
@@ -279,15 +276,15 @@ def training_loop(
             all_gen_z = torch.randn([len(phases) * batch_size, G.z_dim], device=device)
             all_gen_z = [phase_gen_z.split(batch_gpu) for phase_gen_z in all_gen_z.split(batch_size)]
             all_gen_c = [training_set.get_label(np.random.randint(len(training_set))) for _ in range(len(phases) * batch_size)]
-            all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
+            all_gen_c = device_utils.maybe_pin_memory(torch.from_numpy(np.stack(all_gen_c)), device).to(device)
             all_gen_c = [phase_gen_c.split(batch_gpu) for phase_gen_c in all_gen_c.split(batch_size)]
 
         # Execute training phases.
         for phase, phase_gen_z, phase_gen_c in zip(phases, all_gen_z, all_gen_c):
             if batch_idx % phase.interval != 0:
                 continue
-            if phase.start_event is not None:
-                phase.start_event.record(torch.cuda.current_stream(device))
+            if phase.timer is not None:
+                phase.timer.record_start()
 
             # Accumulate gradients.
             phase.opt.zero_grad(set_to_none=True)
@@ -311,8 +308,8 @@ def training_loop(
                 phase.opt.step()
 
             # Phase done.
-            if phase.end_event is not None:
-                phase.end_event.record(torch.cuda.current_stream(device))
+            if phase.timer is not None:
+                phase.timer.record_end()
 
         # Update G_ema.
         with torch.autograd.profiler.record_function('Gema'):
@@ -350,9 +347,9 @@ def training_loop(
         fields += [f"sec/kimg {training_stats.report0('Timing/sec_per_kimg', (tick_end_time - tick_start_time) / (cur_nimg - tick_start_nimg) * 1e3):<7.2f}"]
         fields += [f"maintenance {training_stats.report0('Timing/maintenance_sec', maintenance_time):<6.1f}"]
         fields += [f"cpumem {training_stats.report0('Resources/cpu_mem_gb', psutil.Process(os.getpid()).memory_info().rss / 2**30):<6.2f}"]
-        fields += [f"gpumem {training_stats.report0('Resources/peak_gpu_mem_gb', torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}"]
-        fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
-        torch.cuda.reset_peak_memory_stats()
+        fields += [f"gpumem {training_stats.report0('Resources/peak_gpu_mem_gb', device_utils.peak_memory_allocated_gb(device)):<6.2f}"]
+        fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', device_utils.peak_memory_reserved_gb(device)):<6.2f}"]
+        device_utils.reset_peak_memory_stats(device)
         fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
         if tracker is not None:
             energy_wh = tracker._total_energy.kWh * 1000
@@ -416,9 +413,8 @@ def training_loop(
         # Collect statistics.
         for phase in phases:
             value = []
-            if (phase.start_event is not None) and (phase.end_event is not None):
-                phase.end_event.synchronize()
-                value = phase.start_event.elapsed_time(phase.end_event)
+            if phase.timer is not None:
+                value = phase.timer.elapsed_ms()
             training_stats.report0('Timing/' + phase.name, value)
         stats_collector.update()
         stats_dict = stats_collector.as_dict()

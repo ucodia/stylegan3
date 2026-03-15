@@ -10,6 +10,11 @@
 "Alias-Free Generative Adversarial Networks"."""
 
 import os
+import platform
+
+if platform.system() == 'Darwin':
+    os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+
 import click
 import re
 import json
@@ -21,6 +26,7 @@ from training import training_loop
 from metrics import metric_main
 from torch_utils import training_stats
 from torch_utils import custom_ops
+from torch_utils import device as device_utils
 
 #----------------------------------------------------------------------------
 
@@ -32,13 +38,13 @@ def subprocess_fn(rank, c, temp_dir):
         init_file = os.path.abspath(os.path.join(temp_dir, '.torch_distributed_init'))
         if os.name == 'nt':
             init_method = 'file:///' + init_file.replace('\\', '/')
-            torch.distributed.init_process_group(backend='gloo', init_method=init_method, rank=rank, world_size=c.num_gpus)
         else:
             init_method = f'file://{init_file}'
-            torch.distributed.init_process_group(backend='nccl', init_method=init_method, rank=rank, world_size=c.num_gpus)
+        backend = device_utils.get_distributed_backend()
+        torch.distributed.init_process_group(backend=backend, init_method=init_method, rank=rank, world_size=c.num_gpus)
 
     # Init torch_utils.
-    sync_device = torch.device('cuda', rank) if c.num_gpus > 1 else None
+    sync_device = device_utils.get_device(rank) if c.num_gpus > 1 else None
     training_stats.init_multiprocessing(rank=rank, sync_device=sync_device)
     if rank != 0:
         custom_ops.verbosity = 'none'
@@ -218,7 +224,9 @@ def main(**kwargs):
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
     c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
-    c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
+    # pin_memory only helps with CUDA; disable for MPS/CPU.
+    _pin = torch.cuda.is_available()
+    c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=_pin, prefetch_factor=2)
 
     # Training set.
     c.training_set_kwargs, dataset_name = init_dataset_kwargs(data=opts.data)
@@ -255,6 +263,12 @@ def main(**kwargs):
         raise click.ClickException('--batch-gpu cannot be smaller than --mbstd')
     if any(not metric_main.is_valid_metric(metric) for metric in c.metrics):
         raise click.ClickException('\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
+
+    # MPS constraints.
+    if not torch.cuda.is_available() and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        if c.num_gpus > 1:
+            raise click.ClickException('Multi-GPU training is not supported on MPS. Use --gpus=1.')
+        print('Note: Running on Apple Silicon (MPS). Custom CUDA ops will use Python fallbacks.')
 
     # Base configuration.
     c.ema_kimg = c.batch_size * 10 / 32
@@ -293,9 +307,13 @@ def main(**kwargs):
         c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.
 
     # Performance-related toggles.
-    if opts.fp32:
+    # Force fp32 on MPS -- float16 support has known issues on Apple Silicon.
+    _force_fp32 = (not torch.cuda.is_available() and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available())
+    if opts.fp32 or _force_fp32:
         c.G_kwargs.num_fp16_res = c.D_kwargs.num_fp16_res = 0
         c.G_kwargs.conv_clamp = c.D_kwargs.conv_clamp = None
+        if _force_fp32 and not opts.fp32:
+            print('Note: Forcing fp32 mode on MPS for numerical stability.')
     if opts.nobench:
         c.cudnn_benchmark = False
     if opts.no_emissions:

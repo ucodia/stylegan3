@@ -9,6 +9,11 @@
 """Calculate quality metrics for previous training run or pretrained network pickle."""
 
 import os
+import platform
+
+if platform.system() == 'Darwin':
+    os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+
 import click
 import json
 import tempfile
@@ -22,6 +27,7 @@ from metrics import metric_utils
 from torch_utils import training_stats
 from torch_utils import custom_ops
 from torch_utils import misc
+from torch_utils import device as device_utils
 from torch_utils.ops import conv2d_gradfix
 
 #----------------------------------------------------------------------------
@@ -34,21 +40,20 @@ def subprocess_fn(rank, args, temp_dir):
         init_file = os.path.abspath(os.path.join(temp_dir, '.torch_distributed_init'))
         if os.name == 'nt':
             init_method = 'file:///' + init_file.replace('\\', '/')
-            torch.distributed.init_process_group(backend='gloo', init_method=init_method, rank=rank, world_size=args.num_gpus)
         else:
             init_method = f'file://{init_file}'
-            torch.distributed.init_process_group(backend='nccl', init_method=init_method, rank=rank, world_size=args.num_gpus)
+        backend = device_utils.get_distributed_backend()
+        torch.distributed.init_process_group(backend=backend, init_method=init_method, rank=rank, world_size=args.num_gpus)
 
     # Init torch_utils.
-    sync_device = torch.device('cuda', rank) if args.num_gpus > 1 else None
+    sync_device = device_utils.get_device(rank) if args.num_gpus > 1 else None
     training_stats.init_multiprocessing(rank=rank, sync_device=sync_device)
     if rank != 0 or not args.verbose:
         custom_ops.verbosity = 'none'
 
     # Configure torch.
-    device = torch.device('cuda', rank)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    device = device_utils.get_device(rank)
+    device_utils.configure_backends(device)
     conv2d_gradfix.enabled = True
 
     # Print network summary.

@@ -17,6 +17,7 @@ import uuid
 import numpy as np
 import torch
 import dnnlib
+from torch_utils import device as device_utils
 
 #----------------------------------------------------------------------------
 
@@ -28,7 +29,7 @@ class MetricOptions:
         self.dataset_kwargs = dnnlib.EasyDict(dataset_kwargs)
         self.num_gpus       = num_gpus
         self.rank           = rank
-        self.device         = device if device is not None else torch.device('cuda', rank)
+        self.device         = device if device is not None else device_utils.get_device(rank)
         self.progress       = progress.sub() if progress is not None and rank == 0 else ProgressMonitor()
         self.cache          = cache
 
@@ -63,7 +64,7 @@ def iterate_random_labels(opts, batch_size):
         dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
         while True:
             c = [dataset.get_label(np.random.randint(len(dataset))) for _i in range(batch_size)]
-            c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
+            c = device_utils.maybe_pin_memory(torch.from_numpy(np.stack(c)), opts.device).to(opts.device)
             yield c
 
 #----------------------------------------------------------------------------
@@ -196,7 +197,8 @@ class ProgressMonitor:
 def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_lo=0, rel_hi=1, batch_size=64, data_loader_kwargs=None, max_items=None, **stats_kwargs):
     dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
     if data_loader_kwargs is None:
-        data_loader_kwargs = dict(pin_memory=True, num_workers=3, prefetch_factor=2)
+        _pin = device_utils.is_cuda(opts.device)
+        data_loader_kwargs = dict(pin_memory=_pin, num_workers=3, prefetch_factor=2)
 
     # Try to lookup from cache.
     cache_file = None
@@ -224,14 +226,18 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
         num_items = min(num_items, max_items)
     stats = FeatureStats(max_items=num_items, **stats_kwargs)
     progress = opts.progress.sub(tag='dataset features', num_items=num_items, rel_lo=rel_lo, rel_hi=rel_hi)
-    detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
+
+    # The Inception feature detector uses grid_sample with border padding,
+    # which is not supported on MPS. Run it on CPU in that case.
+    detector_device = torch.device('cpu') if device_utils.is_mps(opts.device) else opts.device
+    detector = get_feature_detector(url=detector_url, device=detector_device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
 
     # Main loop.
     item_subset = [(i * opts.num_gpus + opts.rank) % num_items for i in range((num_items - 1) // opts.num_gpus + 1)]
     for images, _labels in torch.utils.data.DataLoader(dataset=dataset, sampler=item_subset, batch_size=batch_size, **data_loader_kwargs):
         if images.shape[1] == 1:
             images = images.repeat([1, 3, 1, 1])
-        features = detector(images.to(opts.device), **detector_kwargs)
+        features = detector(images.to(detector_device), **detector_kwargs)
         stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
         progress.update(stats.num_items)
 
@@ -258,7 +264,11 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
     stats = FeatureStats(**stats_kwargs)
     assert stats.max_items is not None
     progress = opts.progress.sub(tag='generator features', num_items=stats.max_items, rel_lo=rel_lo, rel_hi=rel_hi)
-    detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
+
+    # The Inception feature detector uses grid_sample with border padding,
+    # which is not supported on MPS. Run it on CPU in that case.
+    detector_device = torch.device('cpu') if device_utils.is_mps(opts.device) else opts.device
+    detector = get_feature_detector(url=detector_url, device=detector_device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
 
     # Main loop.
     while not stats.is_full():
@@ -271,7 +281,7 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
         images = torch.cat(images)
         if images.shape[1] == 1:
             images = images.repeat([1, 3, 1, 1])
-        features = detector(images, **detector_kwargs)
+        features = detector(images.to(detector_device), **detector_kwargs)
         stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
         progress.update(stats.num_items)
     return stats

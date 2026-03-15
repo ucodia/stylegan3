@@ -10,8 +10,12 @@
 
 import copy
 import os
+import platform
 import re
 from typing import List, Optional, Tuple, Union
+
+if platform.system() == 'Darwin':
+    os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
 
 import click
 import dnnlib
@@ -22,6 +26,7 @@ import torch
 from tqdm import tqdm
 
 import legacy
+from torch_utils import device as device_utils
 
 #----------------------------------------------------------------------------
 
@@ -173,11 +178,7 @@ def generate_images(
     """
 
     print('Loading networks from "%s"...' % network_pkl)
-    device = (
-        torch.device('cuda') if torch.cuda.is_available() else
-        torch.device('mps') if torch.backends.mps.is_available() else
-        torch.device('cpu')
-    )
+    device = device_utils.get_device()
     with dnnlib.util.open_url(network_pkl) as f:
         G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
 
