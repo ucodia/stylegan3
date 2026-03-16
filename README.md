@@ -19,6 +19,8 @@ Training runs are instrumented with [CodeCarbon](https://codecarbon.io/) to meas
 - `energy/tick` (Wh) and `co2eq/tick` (g CO2eq) in the console status line
 - `Emissions/energy_wh` and `Emissions/co2eq_g` curves in TensorBoard
 
+To disable emission tracking, pass `--no-emissions` to the training script.
+
 ## Setup
 
 This was tested on Python 3.13 only.
