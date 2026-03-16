@@ -119,6 +119,7 @@ def training_loop(
     resume_pkl              = None,     # Network pickle to resume training from.
     resume_kimg             = 0,        # First kimg to report when resuming training.
     cudnn_benchmark         = True,     # Enable torch.backends.cudnn.benchmark?
+    track_emissions         = True,     # Enable energy/emission tracking via CodeCarbon?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
 ):
@@ -255,7 +256,7 @@ def training_loop(
 
     # Start emissions tracking (rank 0 only).
     tracker = None
-    if rank == 0:
+    if rank == 0 and track_emissions:
         tracker = EmissionsTracker(
             output_dir=run_dir,
             output_file="emissions.csv",
