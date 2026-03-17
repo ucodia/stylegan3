@@ -36,6 +36,7 @@ activation_funcs = {
 
 _plugin = None
 _mps_plugin = None
+_mps_kernel_logged = False
 _null_tensor = torch.empty([0])
 
 def _init():
@@ -153,6 +154,10 @@ def bias_act(x, b=None, dim=1, act='linear', alpha=None, gain=None, clamp=None, 
     if impl == 'cuda' and x.device.type == 'cuda' and _init():
         return _bias_act_cuda(dim=dim, act=act, alpha=alpha, gain=gain, clamp=clamp).apply(x, b)
     if impl == 'cuda' and x.device.type == 'mps' and _init_mps():
+        global _mps_kernel_logged
+        if not _mps_kernel_logged:
+            print('[bias_act] Using Metal compute shader on MPS.')
+            _mps_kernel_logged = True
         return _bias_act_mps(dim=dim, act=act, alpha=alpha, gain=gain, clamp=clamp).apply(x, b)
     return _bias_act_ref(x=x, b=b, dim=dim, act=act, alpha=alpha, gain=gain, clamp=clamp)
 

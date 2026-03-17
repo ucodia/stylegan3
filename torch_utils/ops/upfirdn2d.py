@@ -9,6 +9,8 @@
 """Custom PyTorch ops for efficient resampling of 2D images."""
 
 import os
+import platform
+import hashlib
 import numpy as np
 import torch
 
@@ -19,6 +21,8 @@ from . import conv2d_gradfix
 #----------------------------------------------------------------------------
 
 _plugin = None
+_mps_plugin = None
+_mps_kernel_logged = False
 
 def _init():
     global _plugin
@@ -31,6 +35,65 @@ def _init():
             extra_cuda_cflags=['--use_fast_math', '--allow-unsupported-compiler'],
         )
     return True
+
+#----------------------------------------------------------------------------
+# MPS (Metal) plugin initialization.
+
+_mps_metal_source_path = os.path.join(os.path.dirname(__file__), 'upfirdn2d.metal')
+
+def _init_mps():
+    """JIT-compile the Objective-C++ bridge for the Metal upfirdn2d shader."""
+    global _mps_plugin
+    if _mps_plugin is not None:
+        return True
+    if platform.system() != 'Darwin':
+        return False
+
+    try:
+        source_dir = os.path.dirname(__file__)
+        mm_source = os.path.join(source_dir, 'upfirdn2d_mps.mm')
+        if not os.path.isfile(mm_source):
+            return False
+
+        hash_md5 = hashlib.md5()
+        for fpath in [mm_source, _mps_metal_source_path]:
+            if os.path.isfile(fpath):
+                with open(fpath, 'rb') as f:
+                    hash_md5.update(f.read())
+        source_digest = hash_md5.hexdigest()
+
+        build_dir = os.path.join(
+            torch.utils.cpp_extension._get_build_directory('upfirdn2d_mps_plugin', verbose=False),
+            source_digest,
+        )
+        os.makedirs(build_dir, exist_ok=True)
+
+        verbose = (custom_ops.verbosity == 'full')
+        if custom_ops.verbosity == 'full':
+            print('Setting up PyTorch MPS plugin "upfirdn2d_mps_plugin"...')
+        elif custom_ops.verbosity == 'brief':
+            print('Setting up PyTorch MPS plugin "upfirdn2d_mps_plugin"... ', end='', flush=True)
+
+        _mps_plugin = torch.utils.cpp_extension.load(
+            name='upfirdn2d_mps_plugin',
+            sources=[mm_source],
+            build_directory=build_dir,
+            verbose=verbose,
+            extra_cflags=['-std=c++17', '-ObjC++'],
+            extra_ldflags=['-framework', 'Metal', '-framework', 'Foundation'],
+        )
+
+        if custom_ops.verbosity == 'full':
+            print('Done setting up PyTorch MPS plugin "upfirdn2d_mps_plugin".')
+        elif custom_ops.verbosity == 'brief':
+            print('Done.')
+        return True
+
+    except Exception as e:
+        if custom_ops.verbosity != 'none':
+            print(f'Failed to compile MPS upfirdn2d plugin: {e}')
+            print('Falling back to reference implementation.')
+        return False
 
 def _parse_scaling(scaling):
     if isinstance(scaling, int):
@@ -159,6 +222,12 @@ def upfirdn2d(x, f, up=1, down=1, padding=0, flip_filter=False, gain=1, impl='cu
     assert impl in ['ref', 'cuda']
     if impl == 'cuda' and x.device.type == 'cuda' and _init():
         return _upfirdn2d_cuda(up=up, down=down, padding=padding, flip_filter=flip_filter, gain=gain).apply(x, f)
+    if impl == 'cuda' and x.device.type == 'mps' and _init_mps():
+        global _mps_kernel_logged
+        if not _mps_kernel_logged:
+            print('[upfirdn2d] Using Metal compute shader on MPS.')
+            _mps_kernel_logged = True
+        return _upfirdn2d_mps(up=up, down=down, padding=padding, flip_filter=flip_filter, gain=gain).apply(x, f)
     return _upfirdn2d_ref(x, f, up=up, down=down, padding=padding, flip_filter=flip_filter, gain=gain)
 
 #----------------------------------------------------------------------------
@@ -271,6 +340,68 @@ def _upfirdn2d_cuda(up=1, down=1, padding=0, flip_filter=False, gain=1):
     # Add to cache.
     _upfirdn2d_cuda_cache[key] = Upfirdn2dCuda
     return Upfirdn2dCuda
+
+#----------------------------------------------------------------------------
+# MPS (Metal) implementation of upfirdn2d().
+
+_upfirdn2d_mps_cache = dict()
+
+def _upfirdn2d_mps(up=1, down=1, padding=0, flip_filter=False, gain=1):
+    """Fast MPS implementation of `upfirdn2d()` using a Metal compute shader."""
+    # Parse arguments.
+    upx, upy = _parse_scaling(up)
+    downx, downy = _parse_scaling(down)
+    padx0, padx1, pady0, pady1 = _parse_padding(padding)
+
+    # Lookup from cache.
+    key = (upx, upy, downx, downy, padx0, padx1, pady0, pady1, flip_filter, gain)
+    if key in _upfirdn2d_mps_cache:
+        return _upfirdn2d_mps_cache[key]
+
+    # Forward op.
+    class Upfirdn2dMPS(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, f): # pylint: disable=arguments-differ
+            assert isinstance(x, torch.Tensor) and x.ndim == 4
+            if f is None:
+                f = torch.ones([1, 1], dtype=torch.float32, device=x.device)
+            if f.ndim == 1 and f.shape[0] == 1:
+                f = f.square().unsqueeze(0)
+            assert isinstance(f, torch.Tensor) and f.ndim in [1, 2]
+            y = x
+            if f.ndim == 2:
+                y = _mps_plugin.upfirdn2d(y, f, upx, upy, downx, downy, padx0, padx1, pady0, pady1, flip_filter, gain, _mps_metal_source_path)
+            else:
+                y = _mps_plugin.upfirdn2d(y, f.unsqueeze(0), upx, 1, downx, 1, padx0, padx1, 0, 0, flip_filter, 1.0, _mps_metal_source_path)
+                y = _mps_plugin.upfirdn2d(y, f.unsqueeze(1), 1, upy, 1, downy, 0, 0, pady0, pady1, flip_filter, gain, _mps_metal_source_path)
+            ctx.save_for_backward(f)
+            ctx.x_shape = x.shape
+            return y
+
+        @staticmethod
+        def backward(ctx, dy): # pylint: disable=arguments-differ
+            f, = ctx.saved_tensors
+            _, _, ih, iw = ctx.x_shape
+            _, _, oh, ow = dy.shape
+            fw, fh = _get_filter_size(f)
+            p = [
+                fw - padx0 - 1,
+                iw * upx - ow * downx + padx0 - upx + 1,
+                fh - pady0 - 1,
+                ih * upy - oh * downy + pady0 - upy + 1,
+            ]
+            dx = None
+            df = None
+
+            if ctx.needs_input_grad[0]:
+                dx = _upfirdn2d_mps(up=down, down=up, padding=p, flip_filter=(not flip_filter), gain=gain).apply(dy, f)
+
+            assert not ctx.needs_input_grad[1]
+            return dx, df
+
+    # Add to cache.
+    _upfirdn2d_mps_cache[key] = Upfirdn2dMPS
+    return Upfirdn2dMPS
 
 #----------------------------------------------------------------------------
 
