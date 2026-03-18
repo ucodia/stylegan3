@@ -14,10 +14,12 @@ import copy
 import json
 import pickle
 import psutil
+import itertools
 import PIL.Image
 import numpy as np
 import torch
 import dnnlib
+import imagehash
 from torch_utils import misc
 from torch_utils import training_stats
 from torch_utils.ops import conv2d_gradfix
@@ -85,6 +87,65 @@ def save_image_grid(img, fname, drange, grid_size):
         PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
     if C == 3:
         PIL.Image.fromarray(img, 'RGB').save(fname)
+
+#----------------------------------------------------------------------------
+
+def compute_hash_diversity_metrics(images, drange):
+    """Compute pairwise pHash and dHash Hamming distances as a collapse detector.
+
+    Takes the individual fake images (before grid stitching) and computes
+    perceptual hash (DCT-based) and difference hash (gradient-based) for each,
+    then measures pairwise Hamming distances across all unique pairs.
+
+    Args:
+        images: numpy array of shape [N, C, H, W] with pixel values in drange.
+        drange: (lo, hi) tuple for the pixel value range (e.g. [-1, 1]).
+
+    Returns:
+        dict of metric name -> float value, with keys like
+        'phash_min', 'phash_p10', 'phash_mean', 'phash_p90', 'phash_max',
+        'dhash_min', 'dhash_p10', 'dhash_mean', 'dhash_p90', 'dhash_max'.
+    """
+    lo, hi = drange
+    N = images.shape[0]
+    if N < 2:
+        return {}
+
+    # Convert to PIL images.
+    pil_images = []
+    for i in range(N):
+        img = images[i]  # [C, H, W]
+        img = (img - lo) * (255.0 / (hi - lo))
+        img = np.clip(np.rint(img), 0, 255).astype(np.uint8)
+        C = img.shape[0]
+        if C == 1:
+            pil_images.append(PIL.Image.fromarray(img[0], 'L'))
+        else:
+            pil_images.append(PIL.Image.fromarray(img.transpose(1, 2, 0), 'RGB'))
+
+    # Compute hashes.
+    phashes = [imagehash.phash(img) for img in pil_images]
+    dhashes = [imagehash.dhash(img) for img in pil_images]
+
+    # Compute pairwise Hamming distances for all unique pairs.
+    phash_dists = []
+    dhash_dists = []
+    for i, j in itertools.combinations(range(N), 2):
+        phash_dists.append(phashes[i] - phashes[j])
+        dhash_dists.append(dhashes[i] - dhashes[j])
+
+    phash_dists = np.array(phash_dists, dtype=np.float64)
+    dhash_dists = np.array(dhash_dists, dtype=np.float64)
+
+    metrics = {}
+    for name, dists in [('phash', phash_dists), ('dhash', dhash_dists)]:
+        metrics[f'{name}_min'] = float(np.min(dists))
+        metrics[f'{name}_p10'] = float(np.percentile(dists, 10))
+        metrics[f'{name}_mean'] = float(np.mean(dists))
+        metrics[f'{name}_p90'] = float(np.percentile(dists, 90))
+        metrics[f'{name}_max'] = float(np.max(dists))
+
+    return metrics
 
 #----------------------------------------------------------------------------
 
@@ -382,6 +443,11 @@ def training_loop(
             images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
 
+            # Compute hash diversity metrics on individual fake images.
+            hash_metrics = compute_hash_diversity_metrics(images, drange=[-1, 1])
+            for name, value in hash_metrics.items():
+                stats_metrics[name] = value
+
         # Save network snapshot.
         snapshot_pkl = None
         snapshot_data = None
@@ -427,6 +493,7 @@ def training_loop(
         timestamp = time.time()
         if stats_jsonl is not None:
             fields = dict(stats_dict, timestamp=timestamp)
+            fields.update(stats_metrics)
             stats_jsonl.write(json.dumps(fields) + '\n')
             stats_jsonl.flush()
         if stats_tfevents is not None:
