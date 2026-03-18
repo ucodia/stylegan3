@@ -9,6 +9,7 @@ The goal of this repository is to continue developping the tooling for training 
 - Fix training resume feature to restart fron last known kimg iteration count
 - Apple Silicon support for image and video generation
 - Add support for quantized palette images in dataset creation tool
+- Re-add `--augpipe` option from StyleGAN2-ADA with presets: `blit`, `geom`, `color`, `filter`, `noise`, `cutout`, `bg`, `bgc`, `bgcf`, `bgcfn`, `bgcfnc` (default: `bgc`)
 
 ## Carbon Tracking
 
