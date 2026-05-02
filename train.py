@@ -146,6 +146,49 @@ def extract_resume_kimg(resume_pkl):
 
 #----------------------------------------------------------------------------
 
+def parse_snap(s):
+    """Parse the --snap option.
+
+    Returns a tuple (default_snap_int, schedule_or_None):
+      - Integer mode (e.g. "50"):           (50, None)
+      - Schedule mode (e.g. "0:1,500:5"):   (1, [(0, 1), (500, 5)])
+
+    The schedule is a list of (kimg, snap) tuples, sorted strictly by kimg,
+    starting at kimg 0. Snap values are in ticks.
+    """
+    if ':' not in s:
+        try:
+            n = int(s)
+        except ValueError:
+            raise click.ClickException(f'--snap: invalid integer value: {s!r}')
+        if n < 1:
+            raise click.ClickException('--snap: must be >= 1')
+        return n, None
+
+    schedule = []
+    for entry in s.split(','):
+        parts = entry.split(':')
+        if len(parts) != 2:
+            raise click.ClickException(f'--snap: invalid schedule entry {entry!r}, expected "kimg:snap"')
+        try:
+            kimg = int(parts[0])
+            snap = int(parts[1])
+        except ValueError:
+            raise click.ClickException(f'--snap: schedule values must be integers in {entry!r}')
+        if snap < 1:
+            raise click.ClickException(f'--snap: snap must be >= 1 in {entry!r}')
+        schedule.append((kimg, snap))
+
+    if schedule[0][0] != 0:
+        raise click.ClickException('--snap: schedule must start with "0:"')
+    for i in range(1, len(schedule)):
+        if schedule[i][0] <= schedule[i-1][0]:
+            raise click.ClickException('--snap: schedule kimg values must be strictly increasing')
+
+    return schedule[0][1], schedule
+
+#----------------------------------------------------------------------------
+
 @click.command()
 
 # Required.
@@ -180,7 +223,7 @@ def extract_resume_kimg(resume_pkl):
 @click.option('--metrics',      help='Quality metrics', metavar='[NAME|A,B,C|none]',            type=parse_comma_separated_list, default='fid50k_full', show_default=True)
 @click.option('--kimg',         help='Total training duration', metavar='KIMG',                 type=click.IntRange(min=1), default=25000, show_default=True)
 @click.option('--tick',         help='How often to print progress', metavar='KIMG',             type=click.IntRange(min=1), default=4, show_default=True)
-@click.option('--snap',         help='How often to save snapshots', metavar='TICKS',            type=click.IntRange(min=1), default=50, show_default=True)
+@click.option('--snap',         help='Snapshot cadence: TICKS (int) or "kimg:ticks,kimg:ticks,..." schedule', metavar='TICKS|SCHED', type=str, default='50', show_default=True)
 @click.option('--seed',         help='Random seed', metavar='INT',                              type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--fp32',         help='Disable mixed-precision', metavar='BOOL',                 type=bool, default=False, show_default=True)
 @click.option('--nobench',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
@@ -243,7 +286,9 @@ def main(**kwargs):
     c.metrics = opts.metrics
     c.total_kimg = opts.kimg
     c.kimg_per_tick = opts.tick
-    c.image_snapshot_ticks = c.network_snapshot_ticks = opts.snap
+    snap_default, snap_schedule = parse_snap(opts.snap)
+    c.image_snapshot_ticks = c.network_snapshot_ticks = snap_default
+    c.snap_schedule = snap_schedule
     c.random_seed = c.training_set_kwargs.random_seed = opts.seed
     c.data_loader_kwargs.num_workers = opts.workers
 

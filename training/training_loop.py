@@ -88,6 +88,40 @@ def save_image_grid(img, fname, drange, grid_size):
 
 #----------------------------------------------------------------------------
 
+def get_active_snap(schedule, default_snap, cur_kimg):
+    """Return the active snapshot cadence (in ticks) for the current training progress.
+
+    When ``schedule`` is None, returns ``default_snap`` unchanged. Otherwise returns
+    the snap value from the most recent schedule entry whose kimg threshold is
+    <= ``cur_kimg``.
+
+    >>> get_active_snap(None, 50, 800)
+    50
+    >>> get_active_snap([(0, 1), (500, 5), (1500, 12)], 50, 0)
+    1
+    >>> get_active_snap([(0, 1), (500, 5), (1500, 12)], 50, 499)
+    1
+    >>> get_active_snap([(0, 1), (500, 5), (1500, 12)], 50, 500)
+    5
+    >>> get_active_snap([(0, 1), (500, 5), (1500, 12)], 50, 800)
+    5
+    >>> get_active_snap([(0, 1), (500, 5), (1500, 12)], 50, 1500)
+    12
+    >>> get_active_snap([(0, 1), (500, 5), (1500, 12)], 50, 9999)
+    12
+    """
+    if schedule is None:
+        return default_snap
+    active = default_snap
+    for kimg, snap in schedule:
+        if kimg <= cur_kimg:
+            active = snap
+        else:
+            break
+    return active
+
+#----------------------------------------------------------------------------
+
 def training_loop(
     run_dir                 = '.',      # Output directory.
     training_set_kwargs     = {},       # Options for training set.
@@ -116,6 +150,7 @@ def training_loop(
     kimg_per_tick           = 4,        # Progress snapshot interval.
     image_snapshot_ticks    = 50,       # How often to save image snapshots? None = disable.
     network_snapshot_ticks  = 50,       # How often to save network snapshots? None = disable.
+    snap_schedule           = None,     # Optional cadence schedule [(kimg, ticks), ...]; overrides network_snapshot_ticks per-tick. None = use fixed cadence.
     resume_pkl              = None,     # Network pickle to resume training from.
     resume_kimg             = 0,        # First kimg to report when resuming training.
     cudnn_benchmark         = True,     # Enable torch.backends.cudnn.benchmark?
@@ -377,15 +412,18 @@ def training_loop(
                 print()
                 print('Aborting...')
 
+        # Resolve active snapshot cadence (constant in integer mode, varies in schedule mode).
+        active_snap = get_active_snap(snap_schedule, network_snapshot_ticks, cur_nimg // 1000)
+
         # Save image snapshot.
-        if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
+        if (rank == 0) and (image_snapshot_ticks is not None) and (active_snap is not None) and (done or cur_tick % active_snap == 0):
             images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
 
         # Save network snapshot.
         snapshot_pkl = None
         snapshot_data = None
-        if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):
+        if (network_snapshot_ticks is not None) and (active_snap is not None) and (done or cur_tick % active_snap == 0):
             snapshot_data = dict(G=G, D=D, G_ema=G_ema, augment_pipe=augment_pipe, training_set_kwargs=dict(training_set_kwargs))
             for key, value in snapshot_data.items():
                 if isinstance(value, torch.nn.Module):
